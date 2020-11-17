@@ -591,11 +591,11 @@ if __name__ == "__main__":
     env.render()
     env.viewer.window.on_key_press = key_press
     env.viewer.window.on_key_release = key_release
-    record_video = False
+    record_video = True
     if record_video:
         from gym.wrappers.monitor import Monitor
 
-        env = Monitor(env, "/tmp/video-test", force=True)
+        env = Monitor(env, "./records/video", force=True)
     isopen = True
     while isopen:
         env.reset()
