@@ -1,17 +1,15 @@
 import math
-import numpy as np
 
 import Box2D
+import gym
+import numpy as np
+import pyglet
+from Box2D.b2 import contactListener
 from Box2D.b2 import fixtureDef
 from Box2D.b2 import polygonShape
-from Box2D.b2 import contactListener
-
-import gym
 from gym import spaces
-from car_dynamics import Car
-from gym.utils import seeding, EzPickle
 
-import pyglet
+from car_dynamics import Car
 
 pyglet.options["debug_gl"] = False
 from pyglet import gl
@@ -24,15 +22,15 @@ WINDOW_W = 1000
 WINDOW_H = 800
 
 SCALE = 2.0  # Track scale
-TRACK_RAD = 900 / SCALE  # Track is heavily morphed circle with this radius
+TRACK_RAD = 1200 / SCALE  # Track is heavily morphed circle with this radius
 PLAYFIELD = 2000 / SCALE  # Game over boundary
 FPS = 50  # Frames per second
-ZOOM = 3.2  # Camera zoom
+ZOOM = 3.3  # Camera zoom
 ZOOM_FOLLOW = True  # Set to False for fixed view (don't use zoom)
 
-TRACK_DETAIL_STEP = 21 / SCALE
-TRACK_TURN_RATE = 0.31
-TRACK_WIDTH = 40 / SCALE
+TRACK_DETAIL_STEP = 15 / SCALE
+TRACK_TURN_RATE = 0.21
+TRACK_WIDTH = 50 / SCALE
 BORDER = 8 / SCALE
 BORDER_MIN_COUNT = 4
 
@@ -88,12 +86,12 @@ class CarRacing(gym.Env):
     def __init__(self, verbose=1):
         # EzPickle.__init__(self)
         self.seed()
-        self.contactListener_keepref = FrictionDetector(self)
-        self.world = Box2D.b2World((0, 0), contactListener=self.contactListener_keepref)
+        self.contactListener = FrictionDetector(self)
+        self.world = Box2D.b2World((0, 0), contactListener=self.contactListener)
         self.viewer = None
         self.invisible_state_window = None
         self.invisible_video_window = None
-        self.road = None
+        self.road = []
         self.car = None
         self.reward = 0.0
         self.prev_reward = 0.0
@@ -110,10 +108,6 @@ class CarRacing(gym.Env):
             low=0, high=255, shape=(STATE_H, STATE_W, 3), dtype=np.uint8
         )
 
-    def seed(self, seed=None):
-        self.np_random, seed = seeding.np_random(seed)
-        return [seed]
-
     def _destroy(self):
         if not self.road:
             return
@@ -123,140 +117,131 @@ class CarRacing(gym.Env):
         self.car.destroy()
 
     def _create_track(self):
+        # CREATE CHECKPOINTS
         CHECKPOINTS = 12
-
-        # Create checkpoints
         checkpoints = []
-        for c in range(CHECKPOINTS):
-            noise = self.np_random.uniform(0, 2 * math.pi * 1 / CHECKPOINTS)
-            alpha = 2 * math.pi * c / CHECKPOINTS + noise
-            rad = self.np_random.uniform(TRACK_RAD / 3, TRACK_RAD)
 
-            if c == 0:
+        for c in range(CHECKPOINTS):
+            noise = np.random.uniform(-math.pi / CHECKPOINTS, math.pi / CHECKPOINTS)  # Add randomness so that the turns are random
+            alpha = 2 * math.pi * c / CHECKPOINTS + noise
+            rad = np.random.uniform(TRACK_RAD / 3, TRACK_RAD)  # Randomize the turns' distances from the origin
+
+            if c == 0:  # We do not want the starting point to be random (alpha=0)
                 alpha = 0
                 rad = 1.5 * TRACK_RAD
-            if c == CHECKPOINTS - 1:
+            elif c == CHECKPOINTS - 1:  # The last point is not random since it may cause problems when checking if a lap is finished
                 alpha = 2 * math.pi * c / CHECKPOINTS
-                self.start_alpha = 2 * math.pi * (-0.5) / CHECKPOINTS
                 rad = 1.5 * TRACK_RAD
 
             checkpoints.append((alpha, rad * math.cos(alpha), rad * math.sin(alpha)))
-        self.road = []
+        self.start_alpha = 2 * math.pi * (CHECKPOINTS - 0.5) / CHECKPOINTS  # We will know that we completed a lap when we pass this angle
 
-        # Go from one checkpoint to another to create track
+        # CREATE TRACK POINTS THAT GO FROM ONE CHECKPOINT TO ANOTHER
         x, y, beta = 1.5 * TRACK_RAD, 0, 0
-        dest_i = 0
-        laps = 0
-        track = []
-        no_freeze = 2500
-        visited_other_side = False
-        while True:
-            alpha = math.atan2(y, x)
-            if visited_other_side and alpha > 0:
+        # x and y are the coordinates of the track points
+        # beta is the angle that defines the direction on which we will move while going to the next checkpoint
+
+        dest_i = 0  # Index of the checkpoint to which we are trying to go right now
+        laps = 0  # The number of times we go over all checkpoints. We will go more than one lap to make sure that we have enough points.
+        track = []  # The list that contains the track points' data
+        max_iters = 2500  # We will create track points until we exceed the max laps or we exceed the max iters
+        # max_iters ensures that we do not get stuck in an infinite loop when the created track points do not progress
+        visited_other_side = False  # True if the last position is below x axis, i.e. y < 0
+
+        # Start generating track points
+        for _ in range(max_iters):
+            alpha = math.atan2(y, x)  # The angle of the current track point, intially zero
+
+            # Since we will compare the current point's alpha with the next checkpoint's alpha to acquire positional information,
+            # we want alpha to be in [0, 2*pi] like the checkpoints' alpha values.
+
+            # Check alpha value to put it in desired interval and to check if a lap is completed:
+            if alpha > 0 and visited_other_side:
                 laps += 1
                 visited_other_side = False
             if alpha < 0:
                 visited_other_side = True
-                alpha += 2 * math.pi
+                alpha += 2 * math.pi  # This will put alpha in [0, 2*pi] for the following operations on this iteration.
 
-            while True:  # Find destination from checkpoints
-                failed = True
+            # Now, we need to find a valid destination checkpoint to go towards to.
+            dest_alpha, dest_x, dest_y = checkpoints[dest_i % len(checkpoints)]  # Take the dest_i'th element of checkpoints
+            if alpha > dest_alpha:  # alpha > dest_alpha means that we have passed our destination point with our last position update
+                final_straight = alpha > checkpoints[-1][0] and dest_i % len(checkpoints) == 0
+                # After the final checkpoint our destination point will be the starting checkpoint and the destination alpha will be zero
+                # Therefore current alpha will be larger than destination alpha until we reach the starting point
+                # We will not update the destination point in this "final straight" interval
+                if not final_straight:
+                    dest_i += 1  # Assign the next checkpoint as destination
+                dest_alpha, dest_x, dest_y = checkpoints[dest_i % len(checkpoints)]
 
-                while True:
-                    dest_alpha, dest_x, dest_y = checkpoints[dest_i % len(checkpoints)]
-                    if alpha <= dest_alpha:
-                        failed = False
-                        break
-                    dest_i += 1
-                    if dest_i % len(checkpoints) == 0:
-                        break
-
-                if not failed:
-                    break
-
-                alpha -= 2 * math.pi
-                continue
+            # We are using a positional update rule that uses beta because of two reasons:
+            # 1) It allows us to do smoother turns in contrast to a method that would move directly from one checkpoint to another
+            # 2) If we move with an algorithm that directly uses the next checkpoint's relative position, we would not be able to pass
+            # that checkpoint (we cannot pass it if we go towards it)
 
             r1x = math.cos(beta)
             r1y = math.sin(beta)
             p1x = -r1y
             p1y = r1x
-            dest_dx = dest_x - x  # vector towards destination
+            # p1 vector shows the direction towards which we will update our track point position
+            # r1 vector is orthogonal to p1 and it will be used to calculate how sharp we need to turn towards our destination
+
+            dest_dx = dest_x - x  # dest_d points from current direction towards destination
             dest_dy = dest_y - y
-            # destination vector projected on rad:
+
+            # Destination vector projected on rad (dot product of r1 and destination vector)
             proj = r1x * dest_dx + r1y * dest_dy
-            while beta - alpha > 1.5 * math.pi:
-                beta -= 2 * math.pi
-            while beta - alpha < -1.5 * math.pi:
-                beta += 2 * math.pi
-            prev_beta = beta
-            proj *= SCALE
-            if proj > 0.3:
+            # proj is a measure of dissimilarity between the moving direction that beta indicates and the one that destination vector indicates
+            proj *= SCALE  # Scale the proj's value
+
+            # Now, we will update beta. That is, we will update our moving direction.
+            # TRACK_TURN_RATE determines how sharp the turns are allowed to be.
+            if proj > 0.3:  # We need to turn CCW
                 beta -= min(TRACK_TURN_RATE, abs(0.001 * proj))
-            if proj < -0.3:
-                beta += min(TRACK_TURN_RATE, abs(0.001 * proj))
-            x += p1x * TRACK_DETAIL_STEP
+            elif proj < -0.3:  # We need to turn CW
+                beta += min(TRACK_TURN_RATE, abs(0.001 * proj))  # If proj is too small, increase beta (but not too much)
+
+            x += p1x * TRACK_DETAIL_STEP  # Update the track point positions
             y += p1y * TRACK_DETAIL_STEP
-            track.append((alpha, prev_beta * 0.5 + beta * 0.5, x, y))
-            if laps > 4:
-                break
-            no_freeze -= 1
-            if no_freeze == 0:
+
+            track.append((alpha, beta, x, y))  # Add track point to track
+
+            if laps > 4:  # 4 laps are enough to form a track
                 break
 
-        # Find closed loop range i1..i2, first loop should be ignored, second is OK
-        i1, i2 = -1, -1
-        i = len(track)
-        while True:
-            i -= 1
-            if i == 0:
-                return False  # Failed
-            pass_through_start = (
-                    track[i][0] > self.start_alpha and track[i - 1][0] <= self.start_alpha
-            )
-            if pass_through_start and i2 == -1:
-                i2 = i
-            elif pass_through_start and i1 == -1:
-                i1 = i
+        # FIND A CLOSED LOOP OF TRACK POINTS
+        start = -1
+        finish = -1
+        for i in range(1, len(track) - 1):
+            pass_through_start = track[i][0] < self.start_alpha and track[i + 1][0] >= self.start_alpha
+            if pass_through_start and start == -1:
+                start = i
+            elif pass_through_start and finish == -1:
+                finish = i
                 break
-        if self.verbose == 1:
-            print("Track generation: %i..%i -> %i-tiles track" % (i1, i2, i2 - i1))
-        assert i1 != -1
-        assert i2 != -1
-
-        track = track[i1: i2 - 1]
-
-        first_beta = track[0][1]
-        first_perp_x = math.cos(first_beta)
-        first_perp_y = math.sin(first_beta)
-        # Length of perpendicular jump to put together head and tail
-        well_glued_together = np.sqrt(
-            np.square(first_perp_x * (track[0][2] - track[-1][2]))
-            + np.square(first_perp_y * (track[0][3] - track[-1][3]))
-        )
-        if well_glued_together > TRACK_DETAIL_STEP:
+        if start == -1 or finish == -1:
             return False
 
-        # Red-white border on hard turns
-        border = [False] * len(track)
-        for i in range(len(track)):
-            good = True
-            oneside = 0
-            for neg in range(BORDER_MIN_COUNT):
-                beta1 = track[i - neg - 0][1]
-                beta2 = track[i - neg - 1][1]
-                good &= abs(beta1 - beta2) > TRACK_TURN_RATE * 0.2
-                oneside += np.sign(beta1 - beta2)
-            good &= abs(oneside) == BORDER_MIN_COUNT
-            border[i] = good
-        for i in range(len(track)):
-            for neg in range(BORDER_MIN_COUNT):
-                border[i - neg] |= border[i]
+        track = track[start: finish - 1]
+
+        # CREATE THE TILES USING THE TRACK POINTS
+        last_beta = track[-1][1]
+        last_perp_x = math.cos(last_beta)
+        last_perp_y = math.sin(last_beta)  # Moving direction from the last track point
+
+        # Check if start and end close enough
+        start_end_connection = np.sqrt(
+            np.square(last_perp_x * (track[0][2] - track[-1][2]))  # Distance between start and end in x direction
+            + np.square(last_perp_y * (track[0][3] - track[-1][3]))  # Distance between start and end in y direction
+        )
+
+        if start_end_connection > TRACK_DETAIL_STEP:  # Distance between two successive track points is supposed to be TRACK_DETAIL_STEP
+            return False
 
         # Create tiles
         for i in range(len(track)):
-            alpha1, beta1, x1, y1 = track[i]
-            alpha2, beta2, x2, y2 = track[i - 1]
+            alpha1, beta1, x1, y1 = track[i]  # ith track point
+            alpha2, beta2, x2, y2 = track[i - 1]  # (i-1)th track point
             road1_l = (
                 x1 - TRACK_WIDTH * math.cos(beta1),
                 y1 - TRACK_WIDTH * math.sin(beta1),
@@ -274,37 +259,16 @@ class CarRacing(gym.Env):
                 y2 + TRACK_WIDTH * math.sin(beta2),
             )
             vertices = [road1_l, road1_r, road2_r, road2_l]
-            self.fd_tile.shape.vertices = vertices
-            t = self.world.CreateStaticBody(fixtures=self.fd_tile)
+            self.fd_tile.shape.vertices = vertices  # Specify the vertices of the base tile fixture
+            t = self.world.CreateStaticBody(fixtures=self.fd_tile)  # Create the tile object from fixture
             t.userData = t
-            c = 0.01 * (i % 3)
-            t.color = [ROAD_COLOR[0] + c, ROAD_COLOR[1] + c, ROAD_COLOR[2] + c]
+            c = 0.005
+            t.color = [ROAD_COLOR[0] + c * (i % 2), ROAD_COLOR[1] + c * (i % 2), ROAD_COLOR[2] + c * (i % 2)]
             t.road_visited = False
-            t.road_friction = 1.0
+            t.road_friction = 1.5
             t.fixtures[0].sensor = True
             self.road_poly.append(([road1_l, road1_r, road2_r, road2_l], t.color))
             self.road.append(t)
-            if border[i]:
-                side = np.sign(beta2 - beta1)
-                b1_l = (
-                    x1 + side * TRACK_WIDTH * math.cos(beta1),
-                    y1 + side * TRACK_WIDTH * math.sin(beta1),
-                )
-                b1_r = (
-                    x1 + side * (TRACK_WIDTH + BORDER) * math.cos(beta1),
-                    y1 + side * (TRACK_WIDTH + BORDER) * math.sin(beta1),
-                )
-                b2_l = (
-                    x2 + side * TRACK_WIDTH * math.cos(beta2),
-                    y2 + side * TRACK_WIDTH * math.sin(beta2),
-                )
-                b2_r = (
-                    x2 + side * (TRACK_WIDTH + BORDER) * math.cos(beta2),
-                    y2 + side * (TRACK_WIDTH + BORDER) * math.sin(beta2),
-                )
-                self.road_poly.append(
-                    ([b1_l, b1_r, b2_r, b2_l], (1, 1, 1) if i % 2 == 0 else (1, 0, 0))
-                )
         self.track = track
         return True
 
@@ -313,7 +277,7 @@ class CarRacing(gym.Env):
         self.reward = 0.0
         self.prev_reward = 0.0
         self.tile_visited_count = 0
-        self.t = 0.0
+        self.t = 0.0  # time
         self.road_poly = []
 
         while True:
@@ -325,18 +289,18 @@ class CarRacing(gym.Env):
                     "retry to generate track (normal if there are not many"
                     "instances of this message)"
                 )
-        self.car = Car(self.world, *self.track[0][1:4])
+        self.car = Car(self.world, *self.track[0][1:4])  # *self.track[0][1:4] indicates the starting point of the track
 
         return self.step(None)[0]
 
     def step(self, action):
         if action is not None:
-            self.car.steer(-action[0])
+            self.car.steer(-action[0])  # Update movement properties using action input
             self.car.gas(action[1])
             self.car.brake(action[2])
 
-        self.car.step(1.0 / FPS)
-        self.world.Step(1.0 / FPS, 6 * 30, 2 * 30)
+        self.car.step(1.0 / FPS)  # Step the car physics
+        self.world.Step(1.0 / FPS, 6 * 30, 2 * 30)  # Step the world physics
         self.t += 1.0 / FPS
 
         self.state = self.render("state_pixels")
@@ -377,7 +341,7 @@ class CarRacing(gym.Env):
             return  # reset() not called yet
 
         # Animate zoom first second:
-        zoom = 0.1 * SCALE * max(1 - self.t, 0) + ZOOM * SCALE * min(self.t, 1)
+        zoom = 0.01 * SCALE * max(1 - self.t, 0) + ZOOM * SCALE * min(self.t, 1)
         scroll_x = self.car.hull.position[0]
         scroll_y = self.car.hull.position[1]
         angle = -self.car.hull.angle
@@ -424,7 +388,6 @@ class CarRacing(gym.Env):
             geom.render()
         self.viewer.onetime_geoms = []
         t.disable()
-        self.render_indicators(WINDOW_W, WINDOW_H)
 
         if mode == "human":
             win.flip()
@@ -445,7 +408,7 @@ class CarRacing(gym.Env):
             self.viewer = None
 
     def render_road(self):
-        colors = [0.4, 0.8, 0.4, 1.0] * 4
+        colors = [0.1, 0.7, 0.1, 1.0] * 4
         polygons_ = [
             +PLAYFIELD,
             +PLAYFIELD,
@@ -462,7 +425,7 @@ class CarRacing(gym.Env):
         ]
 
         k = PLAYFIELD / 20.0
-        colors.extend([0.4, 0.9, 0.4, 1.0] * 4 * 20 * 20)
+        colors.extend([0.1, 0.7, 0.1, 1.0] * 4 * 20 * 20)
         for x in range(-20, 20, 2):
             for y in range(-20, 20, 2):
                 polygons_.extend(
@@ -492,68 +455,68 @@ class CarRacing(gym.Env):
         )
         vl.draw(gl.GL_QUADS)
 
-    def render_indicators(self, W, H):
-        s = W / 40.0
-        h = H / 40.0
-        colors = [0, 0, 0, 1] * 4
-        polygons = [W, 0, 0, W, 5 * h, 0, 0, 5 * h, 0, 0, 0, 0]
-
-        def vertical_ind(place, val, color):
-            colors.extend([color[0], color[1], color[2], 1] * 4)
-            polygons.extend(
-                [
-                    place * s,
-                    h + h * val,
-                    0,
-                    (place + 1) * s,
-                    h + h * val,
-                    0,
-                    (place + 1) * s,
-                    h,
-                    0,
-                    (place + 0) * s,
-                    h,
-                    0,
-                ]
-            )
-
-        def horiz_ind(place, val, color):
-            colors.extend([color[0], color[1], color[2], 1] * 4)
-            polygons.extend(
-                [
-                    (place + 0) * s,
-                    4 * h,
-                    0,
-                    (place + val) * s,
-                    4 * h,
-                    0,
-                    (place + val) * s,
-                    2 * h,
-                    0,
-                    (place + 0) * s,
-                    2 * h,
-                    0,
-                ]
-            )
-
-        true_speed = np.sqrt(
-            np.square(self.car.hull.linearVelocity[0])
-            + np.square(self.car.hull.linearVelocity[1])
-        )
-
-        vertical_ind(5, 0.02 * true_speed, (1, 1, 1))
-        vertical_ind(7, 0.01 * self.car.wheels[0].omega, (0.0, 0, 1))  # ABS sensors
-        vertical_ind(8, 0.01 * self.car.wheels[1].omega, (0.0, 0, 1))
-        vertical_ind(9, 0.01 * self.car.wheels[2].omega, (0.2, 0, 1))
-        vertical_ind(10, 0.01 * self.car.wheels[3].omega, (0.2, 0, 1))
-        horiz_ind(20, -10.0 * self.car.wheels[0].joint.angle, (0, 1, 0))
-        horiz_ind(30, -0.8 * self.car.hull.angularVelocity, (1, 0, 0))
-        vl = pyglet.graphics.vertex_list(
-            len(polygons) // 3, ("v3f", polygons), ("c4f", colors)  # gl.GL_QUADS,
-        )
-        vl.draw(gl.GL_QUADS)
-        self.score_label.text = "%04i" % self.reward
-        self.score_label.draw()
+    # def render_indicators(self, W, H):
+    #     s = W / 40.0
+    #     h = H / 40.0
+    #     colors = [0, 0, 0, 1] * 4
+    #     polygons = [W, 0, 0, W, 5 * h, 0, 0, 5 * h, 0, 0, 0, 0]
+    #
+    #     def vertical_ind(place, val, color):
+    #         colors.extend([color[0], color[1], color[2], 1] * 4)
+    #         polygons.extend(
+    #             [
+    #                 place * s,
+    #                 h + h * val,
+    #                 0,
+    #                 (place + 1) * s,
+    #                 h + h * val,
+    #                 0,
+    #                 (place + 1) * s,
+    #                 h,
+    #                 0,
+    #                 (place + 0) * s,
+    #                 h,
+    #                 0,
+    #             ]
+    #         )
+    #
+    #     def horiz_ind(place, val, color):
+    #         colors.extend([color[0], color[1], color[2], 1] * 4)
+    #         polygons.extend(
+    #             [
+    #                 (place + 0) * s,
+    #                 4 * h,
+    #                 0,
+    #                 (place + val) * s,
+    #                 4 * h,
+    #                 0,
+    #                 (place + val) * s,
+    #                 2 * h,
+    #                 0,
+    #                 (place + 0) * s,
+    #                 2 * h,
+    #                 0,
+    #             ]
+    #         )
+    #
+    #     true_speed = np.sqrt(
+    #         np.square(self.car.hull.linearVelocity[0])
+    #         + np.square(self.car.hull.linearVelocity[1])
+    #     )
+    #
+    #     vertical_ind(5, 0.02 * true_speed, (1, 1, 1))
+    #     vertical_ind(7, 0.01 * self.car.wheels[0].omega, (0.0, 0, 1))  # ABS sensors
+    #     vertical_ind(8, 0.01 * self.car.wheels[1].omega, (0.0, 0, 1))
+    #     vertical_ind(9, 0.01 * self.car.wheels[2].omega, (0.2, 0, 1))
+    #     vertical_ind(10, 0.01 * self.car.wheels[3].omega, (0.2, 0, 1))
+    #     horiz_ind(20, -10.0 * self.car.wheels[0].joint.angle, (0, 1, 0))
+    #     horiz_ind(30, -0.8 * self.car.hull.angularVelocity, (1, 0, 0))
+    #     vl = pyglet.graphics.vertex_list(
+    #         len(polygons) // 3, ("v3f", polygons), ("c4f", colors)  # gl.GL_QUADS,
+    #     )
+    #     vl.draw(gl.GL_QUADS)
+    #     self.score_label.text = "%04i" % self.reward
+    #     self.score_label.draw()
 
 
 if __name__ == "__main__":
@@ -567,19 +530,19 @@ if __name__ == "__main__":
         if k == 0xFF0D:
             restart = True
         if k == key.LEFT:
-            a[0] = -1.0
+            a[0] = -0.2
         if k == key.RIGHT:
-            a[0] = +1.0
+            a[0] = +0.2
         if k == key.UP:
-            a[1] = +1.0
+            a[1] = +0.4
         if k == key.DOWN:
-            a[2] = +0.8  # set 1.0 for wheels to block to zero rotation
+            a[2] = +0.4  # set 1.0 for wheels to block to zero rotation
 
 
     def key_release(k, mod):
-        if k == key.LEFT and a[0] == -1.0:
+        if k == key.LEFT and a[0] == -0.2:
             a[0] = 0
-        if k == key.RIGHT and a[0] == +1.0:
+        if k == key.RIGHT and a[0] == +0.2:
             a[0] = 0
         if k == key.UP:
             a[1] = 0
