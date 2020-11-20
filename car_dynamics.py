@@ -10,30 +10,14 @@ FRICTION_LIMIT = 1000 * SIZE * SIZE  # friction ~= mass ~= size^2 (calculated im
 WHEEL_R = 27
 WHEEL_W = 14
 WHEELPOS = [
-    (-55, +80), (+55, +80),
-    (-55, -82), (+55, -82)
+    (-55, +50), (+55, +50),
+    (-55, -52), (+55, -52)
 ]
 HULL_POLY1 = [
-    (-60, +130), (+60, +130),
-    (+60, +110), (-60, +110)
-]
-HULL_POLY2 = [
-    (-15, +120), (+15, +120),
-    (+20, +20), (-20, 20)
-]
-HULL_POLY3 = [
-    (+25, +20),
-    (+50, -10),
-    (+50, -40),
-    (+20, -90),
-    (-20, -90),
-    (-50, -40),
-    (-50, -10),
-    (-25, +20)
-]
-HULL_POLY4 = [
-    (-50, -120), (+50, -120),
-    (+50, -90), (-50, -90)
+    (+50, +100),
+    (+50, -90),
+    (-50, -90),
+    (-50, +100),
 ]
 WHEEL_COLOR = (0.0, 0.0, 0.0)
 WHEEL_WHITE = (0.3, 0.3, 0.3)
@@ -50,14 +34,11 @@ class Car:
             # These are the four pieces that construct the car's body
             fixtures=[
                 fixtureDef(shape=polygonShape(vertices=[(x * SIZE, y * SIZE) for x, y in HULL_POLY1]), density=1.0),
-                fixtureDef(shape=polygonShape(vertices=[(x * SIZE, y * SIZE) for x, y in HULL_POLY2]), density=1.0),
-                fixtureDef(shape=polygonShape(vertices=[(x * SIZE, y * SIZE) for x, y in HULL_POLY3]), density=1.0),
-                fixtureDef(shape=polygonShape(vertices=[(x * SIZE, y * SIZE) for x, y in HULL_POLY4]), density=1.0)
             ]
         )
         # It will be initiated as self.world = Box2D.b2World((0, 0), contactListener=self.contactListener_keepref)
         self.world = world
-        self.hull.color = (0.1, 0.1, 0.4)
+        self.hull.color = (0.8, 0.8, 0.1)
         self.wheels = []
         WHEEL_POLY = [
             (-WHEEL_W, +WHEEL_R), (+WHEEL_W, +WHEEL_R),
