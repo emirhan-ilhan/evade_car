@@ -361,12 +361,13 @@ class CarRacing(gym.Env):
         return self.step(None)[0]
 
     def step(self, action):
+        self.action = action
         self.crash = False
         if action is not None:
-            action = convert_action(action)
-            self.car.steer(action[0] - action[1])  # Update movement properties using action input
-            self.car.gas(action[2])
-            self.car.brake(action[3])
+            action_arr = convert_action(action)
+            self.car.steer(action_arr[0] - action_arr[1])  # Update movement properties using action input
+            self.car.gas(action_arr[2])
+            self.car.brake(action_arr[3])
 
         self.car.step(1.0 / FPS)  # Step the car physics
         self.world.Step(1.0 / FPS, 6 * 30, 2 * 30)  # Step the world physics
@@ -380,6 +381,8 @@ class CarRacing(gym.Env):
             self.reward -= 0.1
             step_reward = self.reward - self.prev_reward
             self.prev_reward = self.reward
+            if self.reward < -1000:
+                done = True
             if self.tile_visited_count == len(self.track):
                 done = True
             x, y = self.car.hull.position
@@ -425,7 +428,7 @@ class CarRacing(gym.Env):
             - (scroll_x * zoom * math.cos(angle) - scroll_y * zoom * math.sin(angle)),
             WINDOW_H / 4
             - (scroll_x * zoom * math.sin(angle) + scroll_y * zoom * math.cos(angle)),
-        )
+            )
         self.transform.set_rotation(angle)
 
         self.car.draw(self.viewer)
@@ -455,12 +458,12 @@ class CarRacing(gym.Env):
         gl.glViewport(0, 0, VP_W, VP_H)
         t.enable()
         self.render_road()
-        # self.render_indicators(VIDEO_H, VIDEO_H)
         for geom in self.viewer.onetime_geoms:
             geom.render()
         self.viewer.onetime_geoms = []
         t.disable()
-
+        self.render_keys(WINDOW_W, self.action)
+        # self.render_indicators(WINDOW_W, WINDOW_H)
         if mode == "human":
             win.flip()
             return self.viewer.isopen
@@ -478,6 +481,46 @@ class CarRacing(gym.Env):
         if self.viewer is not None:
             self.viewer.close()
             self.viewer = None
+
+    def render_keys(self, W, action):
+        s = W / 100.0
+        colors = []
+        polygons = []
+
+        def add_poly(x, y, size, color):
+            colors.extend([color[0], color[1], color[2], color[3]] * 4)
+            polygons.extend(
+                [
+                    x * s,
+                    y * s,
+                    0,
+                    (x + size) * s,
+                    y * s,
+                    0,
+                    (x + size) * s,
+                    (y + size) * s,
+                    0,
+                    x * s,
+                    (y + size) * s,
+                    0,
+                ]
+            )
+
+        col = [1, 1, 1, 1]
+
+        if action is not None and action < 4:
+            col[action] = 0.1
+
+        add_poly(84, 2, 4, (1, col[0], col[0], 0.3))
+        add_poly(94, 2, 4, (1, col[1], col[1], 0.3))
+        add_poly(89, 7, 4, (1, col[2], col[2], 0.3))
+        add_poly(89, 2, 4, (1, col[3], col[3], 0.3))
+
+        vl = pyglet.graphics.vertex_list(
+            len(polygons) // 3, ("v3f", polygons), ("c4f", colors)  # gl.GL_QUADS,
+        )
+        vl.draw(gl.GL_QUADS)
+        vl.delete()
 
     def render_road(self):
         colors = [0.1, 0.8, 0.1, 1.0] * 4
@@ -526,71 +569,7 @@ class CarRacing(gym.Env):
             len(polygons_) // 3, ("v3f", polygons_), ("c4f", colors)  # gl.GL_QUADS,
         )
         vl.draw(gl.GL_QUADS)
-
         vl.delete()
-
-    def render_indicators(self, W, H):
-        s = W / 40.0
-        h = H / 40.0
-        colors = [0, 0, 0, 1] * 4
-        polygons = [W, 0, 0, W, 5 * h, 0, 0, 5 * h, 0, 0, 0, 0]
-
-        def vertical_ind(place, val, color):
-            colors.extend([color[0], color[1], color[2], 1] * 4)
-            polygons.extend(
-                [
-                    place * s,
-                    h + h * val,
-                    0,
-                    (place + 1) * s,
-                    h + h * val,
-                    0,
-                    (place + 1) * s,
-                    h,
-                    0,
-                    (place + 0) * s,
-                    h,
-                    0,
-                ]
-            )
-
-        def horiz_ind(place, val, color):
-            colors.extend([color[0], color[1], color[2], 1] * 4)
-            polygons.extend(
-                [
-                    (place + 0) * s,
-                    4 * h,
-                    0,
-                    (place + val) * s,
-                    4 * h,
-                    0,
-                    (place + val) * s,
-                    2 * h,
-                    0,
-                    (place + 0) * s,
-                    2 * h,
-                    0,
-                ]
-            )
-
-        true_speed = np.sqrt(
-            np.square(self.car.hull.linearVelocity[0])
-            + np.square(self.car.hull.linearVelocity[1])
-        )
-
-        vertical_ind(5, 0.02 * true_speed, (1, 1, 1))
-        vertical_ind(7, 0.01 * self.car.wheels[0].omega, (0.0, 0, 1))  # ABS sensors
-        vertical_ind(8, 0.01 * self.car.wheels[1].omega, (0.0, 0, 1))
-        vertical_ind(9, 0.01 * self.car.wheels[2].omega, (0.2, 0, 1))
-        vertical_ind(10, 0.01 * self.car.wheels[3].omega, (0.2, 0, 1))
-        horiz_ind(20, -10.0 * self.car.wheels[0].joint.angle, (0, 1, 0))
-        horiz_ind(30, -0.8 * self.car.hull.angularVelocity, (1, 0, 0))
-        vl = pyglet.graphics.vertex_list(
-            len(polygons) // 3, ("v3f", polygons), ("c4f", colors)  # gl.GL_QUADS,
-        )
-        vl.draw(gl.GL_QUADS)
-        self.score_label.text = "%04i" % self.reward
-        self.score_label.draw()
 
 
 def make_env():
