@@ -1,17 +1,19 @@
 import math
-import os, shutil
 
 import Box2D
 import gym
 import numpy as np
 import pyglet
+import torch
 from Box2D.b2 import contactListener
 from Box2D.b2 import fixtureDef
 from Box2D.b2 import polygonShape
 from gym import spaces
-from utils import convert_action
 
+from DQN import DQN
 from car_dynamics import Car
+from utils import convert_action
+from wrappers import *
 
 pyglet.options["debug_gl"] = False
 from pyglet import gl
@@ -36,14 +38,13 @@ TRACK_WIDTH = 70 / SCALE
 BORDER = 8 / SCALE
 BORDER_MIN_COUNT = 4
 
-ROAD_COLOR = [0.4, 0.4, 0.4]
+ROAD_COLOR = [0.3, 0.3, 0.3]
 
 
 class FrictionDetector(contactListener):
     def __init__(self, env):
         contactListener.__init__(self)
         self.env = env
-        self.out_road = False
 
     def BeginContact(self, contact):
         self._contact(contact, True)
@@ -109,17 +110,12 @@ class CarRacing(gym.Env):
         self.fd_tile = fixtureDef(
             shape=polygonShape(vertices=[(0, 0), (1, 0), (1, -1), (0, -1)])
         )
-
-        # self.action_space = spaces.Box(
-        #     np.array([0, 0, 0, 0]), np.array([+1, +1, +1, +1]), dtype=np.int8
-        # )  # steer, gas, brake
-
-        self.action_space = spaces.Discrete(16)
+        self.show = False
+        self.action_space = spaces.Discrete(5)
 
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(STATE_H, STATE_W, 3), dtype=np.uint8
         )
-        self.out_road = False
 
     def _destroy(self):
         if not self.road:
@@ -391,6 +387,8 @@ class CarRacing(gym.Env):
                 done = True
                 step_reward = -100
 
+        if self.show:
+            self.render()
         return self.state, step_reward, done, {}
 
     def render(self, mode="human"):
@@ -427,7 +425,7 @@ class CarRacing(gym.Env):
             - (scroll_x * zoom * math.cos(angle) - scroll_y * zoom * math.sin(angle)),
             WINDOW_H / 4
             - (scroll_x * zoom * math.sin(angle) + scroll_y * zoom * math.cos(angle)),
-            )
+        )
         self.transform.set_rotation(angle)
 
         self.car.draw(self.viewer)
@@ -470,7 +468,7 @@ class CarRacing(gym.Env):
         image_data = (
             pyglet.image.get_buffer_manager().get_color_buffer().get_image_data()
         )
-        arr = np.fromstring(image_data.get_data(), dtype=np.uint8, sep="")
+        arr = np.frombuffer(image_data.get_data(), dtype=np.uint8)
         arr = arr.reshape(VP_H, VP_W, 4)
         arr = arr[::-1, :, 0:3]
 
@@ -482,7 +480,7 @@ class CarRacing(gym.Env):
             self.viewer = None
 
     def render_road(self):
-        colors = [0.1, 0.7, 0.1, 1.0] * 4
+        colors = [0.1, 0.8, 0.1, 1.0] * 4
         polygons_ = [
             +PLAYFIELD,
             +PLAYFIELD,
@@ -499,7 +497,7 @@ class CarRacing(gym.Env):
         ]
 
         k = PLAYFIELD / 20.0
-        colors.extend([0.1, 0.72, 0.1, 1.0] * 4 * 20 * 20)
+        colors.extend([0.1, 0.82, 0.1, 1.0] * 4 * 20 * 20)
         for x in range(-20, 20, 2):
             for y in range(-20, 20, 2):
                 polygons_.extend(
@@ -595,26 +593,52 @@ class CarRacing(gym.Env):
         self.score_label.draw()
 
 
-def grayscale(s):
-    return np.dot(s[..., :3], [0.299, 0.587, 0.114])
+def make_env():
+    env = CarRacing()
+    env.show = True
+    env = SkipAndStep(env, skip=6)
+    env = ProcessFrame(env)
+    env = BufferWrapper(env, 6)
+    env = ImageToPyTorch(env)
+    env = ScaledFloatFrame(env)
+    return env
 
 
-def clear_dir(folder):
-    if not os.path.exists(folder):
-        os.mkdir(folder)
-    else:
-        for filename in os.listdir(folder):
-            file_path = os.path.join(folder, filename)
-            try:
-                if os.path.isfile(file_path) or os.path.islink(file_path):
-                    os.unlink(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-            except Exception as e:
-                print(e)
+class Agent:
+    def __init__(self, env):
+        self.env = env
+        self._reset()
+
+    def _reset(self):
+        self.state = env.reset()
+        self.total_reward = 0.0
+
+    def play_step(self, net, epsilon=0.0, device="cpu"):
+
+        done_reward = None
+        if np.random.random() < epsilon:
+            action = env.action_space.sample()
+        else:
+            state_a = np.array([self.state], copy=False)
+            state_v = torch.tensor(state_a).to(device)
+            with torch.set_grad_enabled(False):
+                q_vals_v = net(state_v).detach()
+            _, act_v = torch.max(q_vals_v, dim=1)
+            action = act_v.item()
+
+        new_state, reward, is_done, _ = self.env.step(action)
+        self.total_reward += reward
+
+        self.state = new_state
+        if is_done:
+            done_reward = self.total_reward
+            self._reset()
+        return done_reward
 
 
 if __name__ == "__main__":
+    mode = "agent"  # 'human' or 'agent'
+
     from pyglet.window import key
 
     a = np.array([0, 0, 0, 0])
@@ -647,44 +671,40 @@ if __name__ == "__main__":
 
     num_episodes = 5
 
-    env = CarRacing()
-    env.render()
-    env.viewer.window.on_key_press = key_press
-    env.viewer.window.on_key_release = key_release
+    if mode == "human":
+        env = CarRacing()
+        env.show = True
+        env.render()
+        env.viewer.window.on_key_press = key_press
+        env.viewer.window.on_key_release = key_release
+    elif mode == "agent":
+        env = make_env()
+        env.render()
+        model = DQN(env.observation_space.shape, env.action_space.n)
+        model.load_state_dict(torch.load("best_model.dat"))
+        agent = Agent(env)
+
+    env.reset()
+
     record_video = False
-    clear_dir("./records")
     if record_video:
         from gym.wrappers import Monitor
 
-        env = Monitor(env, "./records/video", force=True)
+        env = Monitor(env, "./recordss/video", force=True)
     isopen = True
     while isopen:
         for episode in range(num_episodes):
-            folder = "./records/e_" + str(episode)
-            clear_dir(folder)
-            env.reset()
-            total_reward = 0.0
-            steps = 0
             restart = False
-            actions = []
-            rewards = []
             while True:
-                # a[:3] = env.action_space.sample()[:3]
-                s, r, done, info = env.step(convert_action(a, reverse=True))
-                actions.append(a)
-                rewards.append(r)
-                np.save("./records/e_" + str(episode) + "/" + "s_" + str(steps), grayscale(s))
-                total_reward += r
-                if steps % 200 == 0 or done:
-                    print("\naction " + str(["{:+0.2f}".format(x) for x in a]))
-                    print("step {} total_reward {:+0.2f}".format(steps, total_reward))
-                steps += 1
-                isopen = env.render()
-                if done or restart:
-                    break
-            np.save("./records/e_" + str(episode) + "/" + "actions", np.array(actions))
-            np.save("./records/e_" + str(episode) + "/" + "rewards", np.array(rewards))
-            if not isopen:
-                break
+                if mode == "human":
+                    s, r, done, info = env.step(convert_action(a, reverse=True))
+                    if done:
+                        break
+                elif mode == "agent":
+                    reward = agent.play_step(model)
+                    if reward is not None or restart:
+                        break
+            env.reset()
+
         break
     env.close()

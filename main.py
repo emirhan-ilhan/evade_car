@@ -1,16 +1,15 @@
-import gym
-import numpy as np
 import torch
-import torch.optim as optim
-import torch.nn as nn
-from pyglet.window import key
+import warnings
+from collections import namedtuple
 
-from collections import deque, namedtuple
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+from DQN import DQN
 from game import CarRacing
 from utils import clear_dir
 from wrappers import *
-from DQN import DQN
-import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -71,9 +70,9 @@ class Agent:
 
 def make_env():
     env = CarRacing()
-    env = SkipAndStep(env, skip=10)
+    env = SkipAndStep(env, skip=4)
     env = ProcessFrame(env)
-    env = BufferWrapper(env, 8)
+    env = BufferWrapper(env, 6)
     env = ImageToPyTorch(env)
     env = ScaledFloatFrame(env)
     return env
@@ -83,16 +82,16 @@ if __name__ == '__main__':
 
     MEAN_REWARD_BOUND = 19.0
 
-    gamma = 0.99
+    gamma = 0.9
     batch_size = 32
     replay_size = 5000
-    learning_rate = 1e-3
+    learning_rate = 3e-4
     sync_target_frames = 200
     replay_start_size = 1000
 
-    eps_start = 1.0
-    eps_decay = .99995
-    eps_min = 0.02
+    eps_start = 0.05
+    eps_decay = .99999
+    eps_min = 0.05
 
     # Initialize environment
     env = make_env()
@@ -102,9 +101,10 @@ if __name__ == '__main__':
     if record_video:
         from gym.wrappers import Monitor
 
-        env = Monitor(env, "./records/video", force=True)
+        env = Monitor(env, "./records/videos", force=True)
 
     model = DQN(env.observation_space.shape, env.action_space.n)
+    model.load_state_dict(torch.load("best_model.dat"))
     with torch.no_grad():
         target_model = DQN(env.observation_space.shape, env.action_space.n)
     for param in target_model.parameters():
@@ -117,6 +117,7 @@ if __name__ == '__main__':
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     loss_function = nn.MSELoss()
     total_rewards = []
+    losses = []
     frame_idx = 0
 
     best_mean_reward = None
@@ -128,7 +129,7 @@ if __name__ == '__main__':
         reward = agent.play_step(model, epsilon)
         if reward is not None:
             total_rewards.append(reward)
-            mean_reward = np.mean(total_rewards[-5:])
+            mean_reward = np.mean(total_rewards[-15:])
 
             print("%d:  %d games, mean reward %.3f, (epsilon %.2f)" % (frame_idx, len(total_rewards), mean_reward, epsilon))
 
@@ -142,7 +143,7 @@ if __name__ == '__main__':
                 continue
 
             l = 0
-            for i in range(30):
+            for i in range(16):
                 model.zero_grad()
                 batch = buffer.sample(batch_size)
                 states, actions, rewards, dones, next_states = batch
@@ -164,10 +165,12 @@ if __name__ == '__main__':
                 loss_t.backward()
                 optimizer.step()
 
-            print("average loss: %.6f" % (l / 10))
+            print("average loss: %.6f" % (l / 16))
+            losses.append(l / 16)
 
         if frame_idx % sync_target_frames == 0:
             with torch.no_grad():
                 target_model.load_state_dict(model.state_dict())
-
+                np.save("rewards", np.array(total_rewards))
+                np.save("losses", np.array(losses))
     env.close()

@@ -4,7 +4,7 @@ import Box2D
 from Box2D.b2 import (edgeShape, circleShape, fixtureDef, polygonShape, revoluteJointDef, contactListener, shape)
 
 SIZE = 0.02
-ENGINE_POWER = 500000000*SIZE*SIZE
+ENGINE_POWER = 1000000000*SIZE*SIZE
 WHEEL_MOMENT_OF_INERTIA = 40000*SIZE*SIZE
 FRICTION_LIMIT = 8000000*SIZE*SIZE     # friction ~= mass ~= size^2 (calculated implicitly using density)
 WHEEL_R = 27
@@ -56,7 +56,7 @@ class Car:
         )
         # It will be initiated as self.world = Box2D.b2World((0, 0), contactListener=self.contactListener_keepref)
         self.world = world
-        self.hull.color = (0.8, 0.8, 0.1)
+        self.hull.color = (0.1, 0.9, 0.9)
         self.wheels = []
         WHEEL_POLY = [
             (-WHEEL_W, +WHEEL_R), (+WHEEL_W, +WHEEL_R),
@@ -162,7 +162,7 @@ class Car:
                     val = abs(w.omega)  # low speed => same as = 0
                 w.omega += dir * val
 
-            engine_break_force = 0.35
+            engine_break_force = 0.15
             engine_break = engine_break_force
             if engine_break > abs(w.omega):
                 engine_break = abs(w.omega)  # low speed => same as = 0
