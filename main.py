@@ -104,7 +104,7 @@ if __name__ == '__main__':
         env = Monitor(env, "./records/videos", force=True)
 
     model = DQN(env.observation_space.shape, env.action_space.n)
-    model.load_state_dict(torch.load("best_model.dat"))
+    # model.load_state_dict(torch.load("best_model.dat"))
     with torch.no_grad():
         target_model = DQN(env.observation_space.shape, env.action_space.n)
     for param in target_model.parameters():
