@@ -1,12 +1,12 @@
-import numpy as np
 import math
-import Box2D
-from Box2D.b2 import (edgeShape, circleShape, fixtureDef, polygonShape, revoluteJointDef, contactListener, shape)
+
+import numpy as np
+from Box2D.b2 import (fixtureDef, polygonShape, revoluteJointDef)
 
 SIZE = 0.02
-ENGINE_POWER = 1000000000*SIZE*SIZE
-WHEEL_MOMENT_OF_INERTIA = 40000*SIZE*SIZE
-FRICTION_LIMIT = 8000000*SIZE*SIZE     # friction ~= mass ~= size^2 (calculated implicitly using density)
+ENGINE_POWER = 1200000000 * SIZE * SIZE
+WHEEL_MOMENT_OF_INERTIA = 17500 * SIZE * SIZE
+FRICTION_LIMIT = 2575000 * SIZE * SIZE  # friction ~= mass ~= size^2 (calculated implicitly using density)
 WHEEL_R = 27
 WHEEL_W = 14
 WHEELPOS = [
@@ -37,6 +37,8 @@ HULL_POLY4 = [
 ]
 WHEEL_COLOR = (0.0, 0.0, 0.0)
 WHEEL_WHITE = (0.3, 0.3, 0.3)
+MUD_COLOR = (0.55, 0.3, 0.0)
+
 
 class Car:
     def __init__(self, world, init_angle, init_x, init_y):
@@ -80,6 +82,8 @@ class Car:
             w.steer = 0.0
             w.phase = 0.0  # wheel angle
             w.omega = 0.0  # angular velocity
+            w.skid_start = None
+            w.skid_particle = None
             rjd = revoluteJointDef(
                 bodyA=self.hull,
                 bodyB=w,
@@ -97,6 +101,7 @@ class Car:
             w.userData = w
             self.wheels.append(w)
         self.drawlist = self.wheels + [self.hull]
+        self.particles = []
 
     def gas(self, gas):
         """control: rear wheel drive
@@ -137,9 +142,11 @@ class Car:
             w.joint.motorSpeed = dir * min(50.0 * val, 3.0)
 
             # Position => friction_limit
-            friction_limit = FRICTION_LIMIT * 0.4  # Grass friction if no tile
+            friction_limit = FRICTION_LIMIT * 0.5  # Grass friction if no tile
+            grass = True
             for tile in w.tiles:
                 friction_limit = max(friction_limit, FRICTION_LIMIT * tile.road_friction)
+                grass = False
 
             # Force
             forw = w.GetWorldVector((0, 1))
@@ -175,7 +182,6 @@ class Car:
             f_force = -vf + vr  # force direction is direction of speed difference
             p_force = -vs
 
-
             # Physically correct is to always apply friction_limit until speed is equal.
             # But dt is finite, that will lead to oscillations if difference is already near zero.
 
@@ -183,6 +189,19 @@ class Car:
             f_force *= 205000 * SIZE * SIZE
             p_force *= 205000 * SIZE * SIZE
             force = np.sqrt(np.square(f_force) + np.square(p_force))
+
+            # Skid trace
+            if abs(force) > 1.7 * friction_limit:
+                if w.skid_particle and w.skid_particle.grass == grass and len(w.skid_particle.poly) < 30:
+                    w.skid_particle.poly.append((w.position[0], w.position[1]))
+                elif w.skid_start is None:
+                    w.skid_start = w.position
+                else:
+                    w.skid_particle = self._create_particle(w.skid_start, w.position, grass)
+                    w.skid_start = None
+            else:
+                w.skid_start = None
+                w.skid_particle = None
 
             if abs(force) > friction_limit:
                 f_force /= force
@@ -196,7 +215,10 @@ class Car:
                 p_force * side[0] + f_force * forw[0],
                 p_force * side[1] + f_force * forw[1]), True)
 
-    def draw(self, viewer):
+    def draw(self, viewer, draw_particles=True):
+        if draw_particles:
+            for p in self.particles:
+                viewer.draw_polyline(p.poly, color=p.color, linewidth=5)
         for obj in self.drawlist:
             for f in obj.fixtures:
                 trans = f.body.transform
@@ -217,6 +239,20 @@ class Car:
                     (+WHEEL_W * SIZE, +WHEEL_R * c2 * SIZE), (-WHEEL_W * SIZE, +WHEEL_R * c2 * SIZE)
                 ]
                 viewer.draw_polygon([trans * v for v in white_poly], color=WHEEL_WHITE)
+
+    def _create_particle(self, point1, point2, grass):
+        class Particle:
+            pass
+
+        p = Particle()
+        p.color = WHEEL_COLOR if not grass else MUD_COLOR
+        p.ttl = 1
+        p.poly = [(point1[0], point1[1]), (point2[0], point2[1])]
+        p.grass = grass
+        self.particles.append(p)
+        while len(self.particles) > 30:
+            self.particles.pop(0)
+        return p
 
     def destroy(self):
         self.world.DestroyBody(self.hull)

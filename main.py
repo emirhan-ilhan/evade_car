@@ -1,4 +1,3 @@
-import torch
 import warnings
 from collections import namedtuple
 
@@ -70,11 +69,11 @@ class Agent:
 
 def make_env():
     env = CarRacing()
-    env = SkipAndStep(env, skip=4)
+    env = SkipAndStep(env, skip=6)
     env = ProcessFrame(env)
-    env = BufferWrapper(env, 6)
+    env = BufferWrapper(env, 10)
     env = ImageToPyTorch(env)
-    env = ScaledFloatFrame(env)
+    env = NormalizeFrame(env)
     return env
 
 
@@ -85,11 +84,11 @@ if __name__ == '__main__':
     gamma = 0.9
     batch_size = 32
     replay_size = 5000
-    learning_rate = 3e-4
+    learning_rate = 1e-4
     sync_target_frames = 200
     replay_start_size = 1000
 
-    eps_start = 0.05
+    eps_start = 0.95
     eps_decay = .99999
     eps_min = 0.05
 

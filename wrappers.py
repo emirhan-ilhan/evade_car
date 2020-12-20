@@ -1,6 +1,8 @@
-import gym
 from collections import deque
+
+import gym
 import numpy as np
+
 from utils import grayscale
 
 
@@ -70,7 +72,7 @@ class ImageToPyTorch(gym.ObservationWrapper):
         return np.moveaxis(observation, 2, 0)
 
 
-class ScaledFloatFrame(gym.ObservationWrapper):
+class NormalizeFrame(gym.ObservationWrapper):
     def observation(self, obs):
         mean = obs.mean(axis=1).mean(axis=1)
         std = obs.std(axis=1).std(axis=1)

@@ -1,8 +1,7 @@
 import math
+import time
 
 import Box2D
-import gym
-import numpy as np
 import pyglet
 import torch
 from Box2D.b2 import contactListener
@@ -20,9 +19,9 @@ from pyglet import gl
 
 STATE_W = 96  # less than Atari 160x192
 STATE_H = 96
-VIDEO_W = 600
-VIDEO_H = 400
-WINDOW_W = 1000
+VIDEO_W = 1200
+VIDEO_H = 800
+WINDOW_W = 1200
 WINDOW_H = 800
 
 SCALE = 6.0  # Track scale
@@ -33,8 +32,8 @@ ZOOM = 1.8  # Camera zoom
 ZOOM_FOLLOW = True  # Set to False for fixed view (don't use zoom)
 
 TRACK_DETAIL_STEP = 18 / SCALE
-TRACK_TURN_RATE = 0.20
-TRACK_WIDTH = 70 / SCALE
+TRACK_TURN_RATE = 0.17
+TRACK_WIDTH = 80 / SCALE
 BORDER = 8 / SCALE
 BORDER_MIN_COUNT = 4
 
@@ -83,6 +82,8 @@ class FrictionDetector(contactListener):
                 tile.road_visited = True
                 self.env.reward += 2000.0 / len(self.env.track)
                 self.env.tile_visited_count += 1
+            if tile.last_tile:
+                self.env.lap = True
         else:
             obj.tiles.remove(tile)
 
@@ -106,6 +107,7 @@ class CarRacing(gym.Env):
         self.car = None
         self.reward = 0.0
         self.prev_reward = 0.0
+        self.lap = False
         self.verbose = verbose
         self.fd_tile = fixtureDef(
             shape=polygonShape(vertices=[(0, 0), (1, 0), (1, -1), (0, -1)])
@@ -132,6 +134,8 @@ class CarRacing(gym.Env):
         # CREATE CHECKPOINTS
         CHECKPOINTS = 20
         checkpoints = []
+
+        # np.random.seed(1871)
 
         for c in range(CHECKPOINTS):
             noise = np.random.uniform(-math.pi / CHECKPOINTS, math.pi / CHECKPOINTS)  # Add randomness so that the turns are random
@@ -273,12 +277,16 @@ class CarRacing(gym.Env):
             vertices = [road1_l, road1_r, road2_r, road2_l]
             self.fd_tile.shape.vertices = vertices  # Specify the vertices of the base tile fixture
             t = self.world.CreateStaticBody(fixtures=self.fd_tile)  # Create the tile object from fixture
+            t.last_tile = False
+            if i == len(track) - 1:
+                t.last_tile = True
             t.userData = t
             c = 0.01
             t.color = [ROAD_COLOR[0] + c * (i % 2), ROAD_COLOR[1] + c * (i % 2), ROAD_COLOR[2] + c * (i % 2)]
             t.road_visited = False
             t.road_friction = 1.5
             t.fixtures[0].sensor = True
+
             self.road_poly.append(([road1_l, road1_r, road2_r, road2_l], t.color))
             self.road.append(t)
 
@@ -342,6 +350,7 @@ class CarRacing(gym.Env):
         self._destroy()
         self.reward = 0.0
         self.prev_reward = 0.0
+        self.lap = False
         self.tile_visited_count = 0
         self.crash = False
         self.t = 0.0  # time
@@ -381,9 +390,9 @@ class CarRacing(gym.Env):
             self.reward -= 0.1
             step_reward = self.reward - self.prev_reward
             self.prev_reward = self.reward
-            if self.reward < -1000:
+            if self.reward < -150:
                 done = True
-            if self.tile_visited_count == len(self.track):
+            if self.tile_visited_count == len(self.track) or (self.lap and self.show):
                 done = True
             x, y = self.car.hull.position
             if abs(x) > PLAYFIELD or abs(y) > PLAYFIELD or self.crash:
@@ -428,7 +437,7 @@ class CarRacing(gym.Env):
             - (scroll_x * zoom * math.cos(angle) - scroll_y * zoom * math.sin(angle)),
             WINDOW_H / 4
             - (scroll_x * zoom * math.sin(angle) + scroll_y * zoom * math.cos(angle)),
-            )
+        )
         self.transform.set_rotation(angle)
 
         self.car.draw(self.viewer)
@@ -575,11 +584,11 @@ class CarRacing(gym.Env):
 def make_env():
     env = CarRacing()
     env.show = True
-    env = SkipAndStep(env, skip=6)
+    env = SkipAndStep(env, skip=3)
     env = ProcessFrame(env)
-    env = BufferWrapper(env, 6)
+    env = BufferWrapper(env, 10)
     env = ImageToPyTorch(env)
-    env = ScaledFloatFrame(env)
+    env = NormalizeFrame(env)
     return env
 
 
@@ -648,7 +657,7 @@ if __name__ == "__main__":
             a[3] = 0
 
 
-    num_episodes = 5
+    num_episodes = 10
 
     if mode == "human":
         env = CarRacing()
@@ -674,15 +683,24 @@ if __name__ == "__main__":
     while isopen:
         for episode in range(num_episodes):
             restart = False
+            start = time.time()
             while True:
                 if mode == "human":
                     s, r, done, info = env.step(convert_action(a, reverse=True))
                     if done:
+                        end = time.time()
                         break
                 elif mode == "agent":
                     reward = agent.play_step(model)
                     if reward is not None or restart:
+                        end = time.time()
                         break
+            if mode == "human":
+                print("score: ", env.reward)
+                print("time ", end - start)
+            elif mode == "agent":
+                print("score: ", reward)
+                print("time ", end - start)
             env.reset()
 
         break
