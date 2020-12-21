@@ -1,8 +1,1 @@
-Execute these in terminal in order.
-```
-conda create --name evade_car
-conda activate evade_car
-conda install -c conda-forge swig
-pip install -r requirements.txt
-python game.py
-```
+[Results](https://drive.google.com/drive/folders/1W0x6Fgn366Q5mu1xIpqvJ6Ka0tD6J61V?usp=sharing)
