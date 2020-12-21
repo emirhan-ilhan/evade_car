@@ -78,9 +78,6 @@ def make_env():
 
 
 if __name__ == '__main__':
-
-    MEAN_REWARD_BOUND = 19.0
-
     gamma = 0.9
     batch_size = 32
     replay_size = 5000
